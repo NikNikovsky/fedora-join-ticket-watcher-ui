@@ -3,7 +3,6 @@
   import heroImage from './assets/hero.png';
   import type { Issue } from './lib/types';
 
-  const STORAGE_KEY = 'welcome-ticket-watchers-token';
   const OWNER = 'join';
   const REPO = 'WelcomeToFedora';
   const PRODUCTION_FORGE_BASE_URL = 'https://forge.fedoraproject.org';
@@ -39,13 +38,7 @@
     statusKind = kind;
   }
 
-  function loadToken() {
-    token = localStorage.getItem(STORAGE_KEY) ?? '';
-  }
-
-  function saveToken() {
-    localStorage.setItem(STORAGE_KEY, token);
-  }
+  // No persistent token storage for security; token is kept in-memory per session
 
   function buildForgeUrl(path: string) {
     const base = FORGE_BASE_URL.endsWith('/') ? FORGE_BASE_URL.slice(0, -1) : FORGE_BASE_URL;
@@ -59,7 +52,9 @@
       headers: {
         Accept: 'application/json',
         Authorization: `token ${token.trim()}`
-      }
+      },
+      mode: 'cors',
+      credentials: 'omit'
     });
     const text = await res.text();
     let data: any = null;
@@ -167,7 +162,7 @@
     pageIssues = issues.slice(start, start + safePageSize);
   }
 
-  onMount(loadToken);
+  // onMount(loadToken); // removed: do not auto-load token from storage for security
 </script>
 
 <svelte:head>
@@ -215,7 +210,7 @@
     <div class="grid2">
       <label>
         Forgejo token
-        <input bind:value={token} type="password" on:input={saveToken} placeholder="paste token" />
+        <input bind:value={token} type="password" placeholder="paste token" />
       </label>
       <label>
         Issue state
