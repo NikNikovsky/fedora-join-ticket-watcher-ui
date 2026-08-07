@@ -38,7 +38,9 @@
     statusKind = kind;
   }
 
-  // No persistent token storage for security; token is kept in-memory per session
+  function getRecency(it: any) {
+    return Date.parse(it.last_comment_at ?? it.updated_at);
+  }
 
   function buildForgeUrl(path: string) {
     const base = FORGE_BASE_URL.endsWith('/') ? FORGE_BASE_URL.slice(0, -1) : FORGE_BASE_URL;
@@ -63,7 +65,25 @@
     return data;
   }
 
-  function normalizeIssues(data: any) {
+  async function fetchLastCommentCreatedAt(issueIndex: number, fallback: string): Promise<string> {
+    try {
+      const comments = await forgeFetch(`/api/v1/repos/${OWNER}/${REPO}/issues/${issueIndex}/comments`);
+      if (Array.isArray(comments) && comments.length > 0) {
+        // Filter out system events (like label additions) by requiring a text body
+        const textComments = comments.filter((c: any) => c.body && c.body.trim().length > 0);
+        
+        if (textComments.length > 0) {
+          const lastComment = textComments[textComments.length - 1];
+          return lastComment?.created_at ?? fallback;
+        }
+      }
+    } catch {
+      // Fall back if comment fetching fails or hits a permissions error
+    }
+    return fallback;
+  }
+
+  async function normalizeIssues(data: any): Promise<Issue[]> {
     const rows = Array.isArray(data)
       ? data
       : Array.isArray(data?.issues)
@@ -72,22 +92,39 @@
           ? data.data
           : Object.values(data ?? {}).filter((v) => v && typeof v === 'object');
 
-    return rows.map((it) => ({
-      index: it.number,
-      title: it.title,
-      updated_at: it.updated_at,
-      labels: it.labels ?? [],
-      assignees: (it.assignees ?? []).map((a: any) => a.login).filter(Boolean),
-      html_url: it.html_url
-    }));
+    return Promise.all(
+      rows.map(async (it: any) => {
+        // Base the default time on the issue's original creation, not its last update
+        let lastCommentAt = it.created_at;
+        
+        // Account for Forgejo's varying payload keys for comment counts
+        const hasComments = (typeof it.comments === 'number' && it.comments > 0) || 
+                            (typeof it.comments_count === 'number' && it.comments_count > 0) || 
+                            (Array.isArray(it.comments) && it.comments.length > 0);
+        
+        if (hasComments) {
+          // Pass created_at as the fallback
+          lastCommentAt = await fetchLastCommentCreatedAt(it.number, it.created_at);
+        }
+
+        return {
+          index: it.number,
+          title: it.title ?? 'Untitled Issue',
+          updated_at: it.updated_at,
+          last_comment_at: lastCommentAt,
+          labels: it.labels ?? [],
+          assignees: (it.assignees ?? []).map((a: any) => a?.login).filter(Boolean),
+          html_url: it.html_url ?? '#'
+        };
+      })
+    );
   }
 
   function updatePageSlice() {
     const safePageSize = Math.max(1, toPositiveInt(pageSize, 50));
-    const safeTotalPages = Math.max(1, Math.ceil(issues.length / safePageSize));
     totalIssues = issues.length;
-    totalPages = safeTotalPages;
-    currentPage = Math.min(Math.max(1, currentPage), safeTotalPages);
+    totalPages = Math.max(1, Math.ceil(totalIssues / safePageSize));
+    currentPage = Math.min(Math.max(1, currentPage), totalPages);
     const start = (currentPage - 1) * safePageSize;
     pageIssues = issues.slice(start, start + safePageSize);
   }
@@ -100,7 +137,7 @@
   async function loadIssues() {
     if (!token.trim()) return setStatus('Token is required.', 'error');
     loading = true;
-    setStatus('Loading issues...');
+    setStatus('Loading issues and comment timelines...');
     reminderIssues = [];
     showReminders = false;
     try {
@@ -117,7 +154,7 @@
         if (labels.trim()) params.set('labels', labels.trim());
 
         const data = await forgeFetch(`/api/v1/repos/${OWNER}/${REPO}/issues?${params.toString()}`);
-        const pageRows = normalizeIssues(data);
+        const pageRows = await normalizeIssues(data);
         fetchedIssues.push(...pageRows);
 
         if (pageRows.length < apiPageSize) break;
@@ -125,12 +162,17 @@
       }
 
       const cutoff = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
-      const recentCount = fetchedIssues.filter((it) => Date.parse(it.updated_at) >= cutoff).length;
+      const recentCount = fetchedIssues.filter((it) => getRecency(it) >= cutoff).length;
       debug = `rows=${fetchedIssues.length} recent=${recentCount}`;
       issues = fetchedIssues;
+      
       currentPage = 1;
       updatePageSlice();
-      setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).`);
+
+      const reminderCutoff = Date.now() - reminderThresholdDays * 24 * 60 * 60 * 1000;
+      reminderIssues = fetchedIssues.filter((it) => getRecency(it) < reminderCutoff);
+      showReminders = reminderIssues.length > 0;
+      setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).` + (showReminders ? ` ${reminderIssues.length} reminder candidate(s).` : ''));
     } catch (e: any) {
       setStatus(e?.message ?? String(e), 'error');
       issues = [];
@@ -142,27 +184,11 @@
     }
   }
 
-  function computeReminderCandidates() {
-    const cutoff = Date.now() - reminderThresholdDays * 24 * 60 * 60 * 1000;
-    reminderIssues = issues.filter((it) => Date.parse(it.updated_at) < cutoff);
-    showReminders = true;
-    setStatus(`Found ${reminderIssues.length} reminder candidate(s).`);
-  }
-
   function labelNames(issue: Issue) {
     return issue.labels.map((l) => (typeof l === 'string' ? l : l.name)).filter(Boolean);
   }
 
-  $: {
-    const safePageSize = Math.max(1, toPositiveInt(pageSize, 50));
-    totalIssues = issues.length;
-    totalPages = Math.max(1, Math.ceil(issues.length / safePageSize));
-    currentPage = Math.min(Math.max(1, currentPage), totalPages);
-    const start = (currentPage - 1) * safePageSize;
-    pageIssues = issues.slice(start, start + safePageSize);
-  }
-
-  // onMount(loadToken); // removed: do not auto-load token from storage for security
+  $: pageSize, updatePageSlice();
 </script>
 
 <svelte:head>
@@ -170,6 +196,7 @@
 </svelte:head>
 
 <main class="shell">
+  <!-- Top Hero Header -->
   <section class="hero panel">
     <div class="hero-copy">
       <div class="eyebrow">Fedora-flavored issue watcher</div>
@@ -183,12 +210,12 @@
           <span>recent issues loaded</span>
         </div>
         <div>
-            <strong>{pageSize}</strong>
-            <span>tickets per page</span>
+          <strong>{pageSize}</strong>
+          <span>tickets per page</span>
         </div>
         <div>
-            <strong>{reminderIssues.length}</strong>
-            <span>reminders queued</span>
+          <strong>{reminderIssues.length}</strong>
+          <span>reminders queued</span>
         </div>
       </div>
     </div>
@@ -198,121 +225,147 @@
     </div>
   </section>
 
-  <section class="panel controls">
-    <div class="section-title">
-      <div>
+  <!-- Side-Control Workspace Layout -->
+  <div class="workspace">
+    <!-- Sidebar / Side-Controls -->
+    <aside class="panel sidebar">
+      <div class="section-title compact">
         <h2>Controls</h2>
-        <p class="meta">For local dev, the app still uses the Vite proxy. Deployed builds should set a Forgejo base URL.</p>
       </div>
       <div class:bad={statusKind === 'error'} class="status">{status}</div>
-    </div>
 
-    <div class="grid2">
-      <label>
-        Forgejo token
-        <input bind:value={token} type="password" placeholder="paste token" />
-      </label>
-      <label>
-        Issue state
-        <select bind:value={state}>
-          <option value="open">open</option>
-          <option value="all">all</option>
-          <option value="closed">closed</option>
-        </select>
-      </label>
-      <label>
-        Labels (optional)
-        <input bind:value={labels} placeholder="leave blank to load all labels" />
-      </label>
-      <label>
-        Recent window (days)
-        <input bind:value={sinceDays} type="number" min="1" step="1" />
-      </label>
-      <label>
-        Reminder threshold (days)
-        <input bind:value={reminderThresholdDays} type="number" min="1" step="1" />
-      </label>
-      <label>
-        Tickets per page
-        <input bind:value={pageSize} type="number" min="10" step="10" />
-      </label>
-    </div>
+      <div class="control-grid">
+        <label>
+          Forgejo token
+          <input bind:value={token} type="password" placeholder="paste token" />
+        </label>
 
-    <div class="buttons">
-      <button on:click={loadIssues} disabled={loading}>{loading ? 'Loading…' : 'Load issues'}</button>
-      <button on:click={computeReminderCandidates} disabled={loading || issues.length === 0}>Show reminder candidates</button>
-    </div>
+        <label>
+          Issue state
+          <select bind:value={state}>
+            <option value="open">open</option>
+            <option value="all">all</option>
+            <option value="closed">closed</option>
+          </select>
+        </label>
 
-    <div class="meta code-line">{debug}</div>
-  </section>
+        <label>
+          Labels (optional)
+          <input bind:value={labels} placeholder="e.g. design" />
+        </label>
 
-  <section class="panel">
-    <div class="section-title compact">
-      <div>
-        <h2>Issues</h2>
-        <p class="meta">Showing page {currentPage} of {totalPages} from {totalIssues} loaded issues in {OWNER}/{REPO}.</p>
-      </div>
-      <div class="page-controls">
-        <button on:click={() => goToPage(currentPage - 1)} disabled={loading || currentPage <= 1}>Previous</button>
-        <button on:click={() => goToPage(currentPage + 1)} disabled={loading || currentPage >= totalPages}>Next</button>
-      </div>
-    </div>
+        <label>
+          Recent window (days)
+          <input bind:value={sinceDays} type="number" min="1" step="1" />
+        </label>
 
-    <div class="tablewrap">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Title</th>
-            <th>Updated</th>
-            <th>Labels</th>
-            <th>Assignees</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each pageIssues as issue}
-            <tr>
-              <td class="mono">#{issue.index}</td>
-              <td><a href={issue.html_url} target="_blank" rel="noreferrer">{issue.title}</a></td>
-              <td class="mono">{issue.updated_at}</td>
-              <td>{labelNames(issue).join(', ')}</td>
-              <td>{issue.assignees.join(', ')}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </section>
+        <label>
+          Reminder threshold (days)
+          <input bind:value={reminderThresholdDays} type="number" min="1" step="1" />
+        </label>
 
-  {#if showReminders}
-    <section class="panel">
-      <div class="section-title compact">
-        <div>
-          <h2>Reminder candidates</h2>
-          <p class="meta">Issues not updated in the last {reminderThresholdDays} days.</p>
-        </div>
+        <label>
+          Tickets per page
+          <input bind:value={pageSize} type="number" min="10" step="10" />
+        </label>
       </div>
 
-      {#if reminderIssues.length === 0}
-        <p>No reminder candidates.</p>
-      {:else}
-        <ul class="reminders">
-          {#each reminderIssues as issue}
-            <li>
-              <a href={issue.html_url} target="_blank" rel="noreferrer">#{issue.index}</a>
-              <span>{issue.title}</span>
-              <small>{issue.updated_at}</small>
-            </li>
-          {/each}
-        </ul>
+      <div class="buttons">
+        <button class="primary-btn" on:click={loadIssues} disabled={loading}>
+          {loading ? 'Loading…' : 'Load issues'}
+        </button>
+      </div>
+
+      {#if debug}
+        <div class="meta code-line">{debug}</div>
       {/if}
-    </section>
-  {/if}
+    </aside>
+
+    <!-- Main Content Area (Compact Issue Feed & Reminders) -->
+    <div class="main-content">
+      <!-- Issue List View -->
+      <section class="panel">
+        <div class="section-title compact">
+          <div>
+            <h2>Issues</h2>
+            <p class="meta">Page {currentPage} of {totalPages} ({totalIssues} total) in {OWNER}/{REPO}</p>
+          </div>
+          <div class="page-controls">
+            <button on:click={() => goToPage(currentPage - 1)} disabled={loading || currentPage <= 1}>Previous</button>
+            <button on:click={() => goToPage(currentPage + 1)} disabled={loading || currentPage >= totalPages}>Next</button>
+          </div>
+        </div>
+
+        <div class="card-feed">
+          {#if pageIssues.length === 0}
+            <p class="empty-state">No issues loaded. Configure settings and click 'Load issues'.</p>
+          {:else}
+            {#each pageIssues as issue}
+              <article class="issue-card">
+                <div class="card-header">
+                  <span class="mono index">#{issue.index}</span>
+                  <a href={issue.html_url} target="_blank" rel="noreferrer" class="issue-title">
+                    {issue.title}
+                  </a>
+                </div>
+
+                <div class="card-meta">
+                  <span><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></span>
+                  
+                  {#if issue.assignees.length > 0}
+                    <span><strong>Assignees:</strong> {issue.assignees.join(', ')}</span>
+                  {/if}
+
+                  {#if labelNames(issue).length > 0}
+                    <div class="tag-list">
+                      {#each labelNames(issue) as tag}
+                        <span class="tag">{tag}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              </article>
+            {/each}
+          {/if}
+        </div>
+      </section>
+
+      <!-- Reminder Candidates Section -->
+      {#if showReminders}
+        <section class="panel">
+          <div class="section-title compact">
+            <div>
+              <h2>Reminder candidates</h2>
+              <p class="meta">Issues with no comments in the last {reminderThresholdDays} days.</p>
+            </div>
+          </div>
+
+          {#if reminderIssues.length === 0}
+            <p class="empty-state">No reminder candidates found.</p>
+          {:else}
+            <div class="reminder-feed">
+              {#each reminderIssues as issue}
+                <div class="reminder-card">
+                  <div class="card-header">
+                    <a href={issue.html_url} target="_blank" rel="noreferrer" class="mono index">#{issue.index}</a>
+                    <span class="issue-title">{issue.title}</span>
+                  </div>
+                  <div class="card-meta">
+                    <small><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></small>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </section>
+      {/if}
+    </div>
+  </div>
 </main>
 
 <style>
   .shell {
-    max-width: 1240px;
+    max-width: 1280px;
     margin: 0 auto;
     padding: 24px 18px 44px;
     display: grid;
@@ -322,17 +375,19 @@
   .panel {
     background: rgba(255, 255, 255, 0.9);
     border: 1px solid rgba(36, 74, 180, 0.12);
-    border-radius: 28px;
+    border-radius: 24px;
     box-shadow: 0 18px 45px rgba(25, 47, 104, 0.09);
     backdrop-filter: blur(12px);
+    padding: 20px;
   }
 
+  /* Hero Section */
   .hero {
     display: grid;
     grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.85fr);
     gap: 18px;
     align-items: center;
-    padding: 30px;
+    padding: 28px;
     position: relative;
     overflow: hidden;
     background:
@@ -343,41 +398,13 @@
     box-shadow: 0 22px 54px rgba(29, 78, 216, 0.22);
   }
 
-  .hero::before,
-  .hero::after {
-    content: '';
-    position: absolute;
-    border-radius: 999px;
-    pointer-events: none;
-    filter: blur(8px);
-  }
-
-  .hero::before {
-    width: 240px;
-    height: 240px;
-    left: -70px;
-    top: -110px;
-    background: radial-gradient(circle, rgba(255, 255, 255, 0.2), transparent 68%);
-  }
-
-  .hero::after {
-    width: 340px;
-    height: 340px;
-    right: -140px;
-    bottom: -180px;
-    background: radial-gradient(circle, rgba(255, 255, 255, 0.12), transparent 70%);
-  }
-
-  .hero-copy,
-  .hero-art {
+  .hero-copy {
     position: relative;
     z-index: 1;
   }
 
   .eyebrow {
     display: inline-flex;
-    align-items: center;
-    gap: 8px;
     padding: 6px 12px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.16);
@@ -389,160 +416,108 @@
     margin-bottom: 12px;
   }
 
-  h1,
-  h2,
-  p {
-    margin: 0;
-  }
-
   h1 {
-    font-size: clamp(2.5rem, 6vw, 4.6rem);
-    line-height: 0.95;
-    letter-spacing: -0.05em;
-    margin-bottom: 12px;
+    font-size: clamp(2.2rem, 5vw, 3.8rem);
+    line-height: 0.98;
+    letter-spacing: -0.04em;
+    margin: 0 0 12px;
     color: white;
   }
 
   .hero-copy > p {
-    max-width: 62ch;
     color: rgba(255, 255, 255, 0.9);
-    font-size: 1.02rem;
-    line-height: 1.6;
+    font-size: 1rem;
+    line-height: 1.5;
+    margin: 0;
   }
 
   .hero-stats {
     display: flex;
-    flex-wrap: wrap;
     gap: 12px;
-    margin-top: 20px;
+    margin-top: 18px;
+    flex-wrap: wrap;
   }
 
   .hero-stats div {
-    min-width: 140px;
-    padding: 14px 16px;
-    border-radius: 18px;
+    padding: 10px 14px;
+    border-radius: 14px;
     background: rgba(255, 255, 255, 0.16);
     border: 1px solid rgba(255, 255, 255, 0.2);
-    backdrop-filter: blur(10px);
   }
 
   .hero-stats strong {
     display: block;
-    font-size: 1.7rem;
-    line-height: 1;
+    font-size: 1.4rem;
     color: white;
   }
 
   .hero-stats span {
-    display: block;
-    margin-top: 6px;
+    font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.88);
-    font-size: 0.9rem;
-  }
-
-  .hero-art {
-    display: grid;
-    place-items: center;
-    min-height: 260px;
-    padding: 20px;
   }
 
   .hero-art img {
-    width: min(100%, 320px);
+    width: min(100%, 260px);
     height: auto;
-    filter: drop-shadow(0 22px 32px rgba(10, 37, 99, 0.24));
-    transform: rotate(-1deg);
     background: rgba(255, 255, 255, 0.82);
-    border-radius: 28px;
-    padding: 14px;
+    border-radius: 20px;
+    padding: 10px;
   }
 
-  .controls,
-  .panel:last-child {
-    padding: 24px;
-  }
-
-  .section-title {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    align-items: flex-start;
-    margin-bottom: 18px;
-  }
-
-  .compact {
-    margin-bottom: 10px;
-  }
-
-  .grid2 {
+  /* Workspace Layout */
+  .workspace {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 320px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    position: sticky;
+    top: 20px;
+  }
+
+  .control-grid {
+    display: flex;
+    flex-direction: column;
     gap: 12px;
   }
 
+  .main-content {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
   label {
-    display: grid;
-    gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     color: #3f506f;
-    font-size: 0.95rem;
+    font-size: 0.88rem;
+    font-weight: 600;
   }
 
   input,
   select {
     border: 1px solid rgba(39, 89, 203, 0.18);
-    border-radius: 14px;
-    padding: 12px 14px;
+    border-radius: 12px;
+    padding: 10px 12px;
     background: rgba(247, 250, 255, 0.96);
     color: #13213c;
-    outline: none;
-  }
-
-  input:focus,
-  select:focus {
-    border-color: rgba(37, 99, 235, 0.72);
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.14);
-  }
-
-  .buttons {
-    display: flex;
-    gap: 12px;
-    margin-top: 16px;
-    flex-wrap: wrap;
-  }
-
-  .page-controls {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  button {
-    border: 0;
-    border-radius: 999px;
-    padding: 12px 18px;
-    background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
-    color: white;
-    font-weight: 700;
-    cursor: pointer;
-    box-shadow: 0 12px 26px rgba(29, 78, 216, 0.22);
-  }
-
-  button:disabled {
-    opacity: 0.65;
-    cursor: not-allowed;
+    font-size: 0.9rem;
   }
 
   .status {
-    display: inline-flex;
-    align-items: center;
-    justify-content: flex-end;
-    margin: 0;
-    padding: 10px 14px;
-    border-radius: 999px;
+    padding: 8px 12px;
+    border-radius: 12px;
     background: rgba(37, 99, 235, 0.08);
     color: #17325f;
+    font-size: 0.85rem;
     border: 1px solid rgba(37, 99, 235, 0.14);
-    min-height: 1.5rem;
   }
 
   .status.bad {
@@ -551,98 +526,135 @@
     color: #a61d1d;
   }
 
-  .meta {
-    color: #62718d;
-    font-size: 0.92rem;
+  .buttons {
+    display: flex;
+    gap: 10px;
   }
 
-  .code-line {
-    margin-top: 14px;
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: rgba(243, 247, 255, 0.8);
-    border: 1px solid rgba(32, 72, 174, 0.1);
-    overflow-wrap: anywhere;
+  button {
+    border: 0;
+    border-radius: 999px;
+    padding: 10px 16px;
+    background: #2563eb;
+    color: white;
+    font-weight: 600;
+    font-size: 0.88rem;
+    cursor: pointer;
   }
 
-  .tablewrap {
-    overflow: auto;
-    border-radius: 18px;
-    border: 1px solid rgba(32, 72, 174, 0.1);
-  }
-
-  table {
+  .primary-btn {
     width: 100%;
-    border-collapse: collapse;
-    min-width: 760px;
+    background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
+    padding: 12px;
   }
 
-  thead {
-    background: rgba(240, 245, 255, 0.98);
+  button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
-  th,
-  td {
-    text-align: left;
-    padding: 14px 16px;
-    border-bottom: 1px solid rgba(32, 72, 174, 0.08);
-    vertical-align: top;
-  }
-
-  tbody tr:hover {
-    background: rgba(37, 99, 235, 0.04);
-  }
-
-  a {
-    color: var(--accent-link);
-    text-decoration: none;
-  }
-
-  a:hover {
-    text-decoration: underline;
-  }
-
-  .mono {
-    font-family: var(--mono);
-    color: #51617d;
-  }
-
-  .reminders {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
+  .section-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
     gap: 12px;
   }
 
-  .reminders li {
-    display: grid;
-    gap: 4px;
-    padding: 14px 16px;
-    border-radius: 18px;
-    background: rgba(243, 247, 255, 0.9);
-    border: 1px solid rgba(32, 72, 174, 0.08);
+  .compact h2 {
+    margin: 0;
+    font-size: 1.25rem;
   }
 
-  .reminders small {
+  .meta {
     color: #62718d;
+    font-size: 0.85rem;
+    margin: 2px 0 0;
+  }
+
+  .page-controls {
+    display: flex;
+    gap: 8px;
+  }
+
+  /* Compact Cards */
+  .card-feed,
+  .reminder-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  .issue-card,
+  .reminder-card {
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: rgba(243, 247, 255, 0.7);
+    border: 1px solid rgba(32, 72, 174, 0.1);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .issue-title {
+    font-weight: 600;
+    color: #1d4ed8;
+    text-decoration: none;
+  }
+
+  .issue-title:hover {
+    text-decoration: underline;
+  }
+
+  .card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: center;
+    font-size: 0.82rem;
+    color: #475569;
+  }
+
+  .tag-list {
+    display: flex;
+    gap: 6px;
+  }
+
+  .tag {
+    background: rgba(37, 99, 235, 0.1);
+    color: #1d4ed8;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+  }
+
+  .mono {
+    font-family: monospace;
+  }
+
+  .empty-state {
+    color: #64748b;
+    font-size: 0.9rem;
+    padding: 12px 0;
   }
 
   @media (max-width: 900px) {
+    .workspace {
+      grid-template-columns: 1fr;
+    }
+
     .hero {
       grid-template-columns: 1fr;
     }
 
-    .grid2 {
-      grid-template-columns: 1fr;
-    }
-
-    .section-title {
-      flex-direction: column;
-    }
-
-    .status {
-      justify-content: flex-start;
+    .sidebar {
+      position: static;
     }
   }
 </style>
