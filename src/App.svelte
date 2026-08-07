@@ -226,7 +226,7 @@
   </section>
 
   <!-- Side-Control Workspace Layout -->
-  <div class="workspace">
+  <div class:has-reminders={showReminders} class="workspace">
     <!-- Sidebar / Side-Controls -->
     <aside class="panel sidebar">
       <div class="section-title compact">
@@ -281,9 +281,8 @@
       {/if}
     </aside>
 
-    <!-- Main Content Area (Compact Issue Feed & Reminders) -->
+    <!-- Main Content Area (Compact Issue Feed) -->
     <div class="main-content">
-      <!-- Issue List View -->
       <section class="panel">
         <div class="section-title compact">
           <div>
@@ -329,37 +328,37 @@
           {/if}
         </div>
       </section>
-
-      <!-- Reminder Candidates Section -->
-      {#if showReminders}
-        <section class="panel">
-          <div class="section-title compact">
-            <div>
-              <h2>Reminder candidates</h2>
-              <p class="meta">Issues with no comments in the last {reminderThresholdDays} days.</p>
-            </div>
-          </div>
-
-          {#if reminderIssues.length === 0}
-            <p class="empty-state">No reminder candidates found.</p>
-          {:else}
-            <div class="reminder-feed">
-              {#each reminderIssues as issue}
-                <div class="reminder-card">
-                  <div class="card-header">
-                    <a href={issue.html_url} target="_blank" rel="noreferrer" class="mono index">#{issue.index}</a>
-                    <span class="issue-title">{issue.title}</span>
-                  </div>
-                  <div class="card-meta">
-                    <small><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></small>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/if}
     </div>
+
+    <!-- Reminder Candidates Section -->
+    {#if showReminders}
+      <section class="panel reminders-panel">
+        <div class="section-title compact">
+          <div>
+            <h2>Reminder candidates</h2>
+            <p class="meta">Issues with no comments in the last {reminderThresholdDays} days.</p>
+          </div>
+        </div>
+
+        {#if reminderIssues.length === 0}
+          <p class="empty-state">No reminder candidates found.</p>
+        {:else}
+          <div class="reminder-feed">
+            {#each reminderIssues as issue}
+              <div class="reminder-card">
+                <div class="card-header">
+                  <a href={issue.html_url} target="_blank" rel="noreferrer" class="mono index">#{issue.index}</a>
+                  <span class="issue-title">{issue.title}</span>
+                </div>
+                <div class="card-meta">
+                  <small><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></small>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/if}
   </div>
 </main>
 
@@ -467,9 +466,13 @@
   /* Workspace Layout */
   .workspace {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 320px minmax(0, 1fr);
     gap: 20px;
     align-items: start;
+  }
+
+  .workspace.has-reminders {
+    grid-template-columns: 320px minmax(0, 1fr) minmax(300px, 0.9fr);
   }
 
   .sidebar {
@@ -490,6 +493,10 @@
     display: flex;
     flex-direction: column;
     gap: 20px;
+  }
+
+  .reminders-panel {
+    align-self: start;
   }
 
   label {
@@ -644,7 +651,7 @@
     padding: 12px 0;
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 1080px) {
     .workspace {
       grid-template-columns: 1fr;
     }
@@ -655,6 +662,10 @@
 
     .sidebar {
       position: static;
+    }
+
+    .workspace.has-reminders {
+      grid-template-columns: 1fr;
     }
   }
 </style>
