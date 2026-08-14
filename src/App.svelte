@@ -110,6 +110,17 @@
     return getReminderDeadline(issue) - now <= 0 ? 'late' : 'soon';
   }
 
+  function compareByReminderCountdown(left: Issue, right: Issue) {
+    const leftRemaining = getReminderDeadline(left) - now;
+    const rightRemaining = getReminderDeadline(right) - now;
+
+    if (leftRemaining !== rightRemaining) {
+      return leftRemaining - rightRemaining;
+    }
+
+    return left.index - right.index;
+  }
+
   function buildForgeUrl(path: string) {
     const base = FORGE_BASE_URL.endsWith('/') ? FORGE_BASE_URL.slice(0, -1) : FORGE_BASE_URL;
     const suffix = path.startsWith('/') ? path : `/${path}`;
@@ -190,11 +201,12 @@
 
   function updatePageSlice() {
     const safePageSize = Math.max(1, toPositiveInt(pageSize, 50));
-    totalIssues = issues.length;
+    const sortedIssues = [...issues].sort(compareByReminderCountdown);
+    totalIssues = sortedIssues.length;
     totalPages = Math.max(1, Math.ceil(totalIssues / safePageSize));
     currentPage = Math.min(Math.max(1, currentPage), totalPages);
     const start = (currentPage - 1) * safePageSize;
-    pageIssues = issues.slice(start, start + safePageSize);
+    pageIssues = sortedIssues.slice(start, start + safePageSize);
   }
 
   function goToPage(page: number) {
@@ -238,7 +250,7 @@
       updatePageSlice();
 
       const reminderCutoff = Date.now() - reminderThresholdDays * 24 * 60 * 60 * 1000;
-      reminderIssues = fetchedIssues.filter((it) => getRecency(it) < reminderCutoff);
+      reminderIssues = fetchedIssues.filter((it) => getRecency(it) < reminderCutoff).sort(compareByReminderCountdown);
       showReminders = reminderIssues.length > 0;
       setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).` + (showReminders ? ` ${reminderIssues.length} reminder candidate(s).` : ''));
     } catch (e: any) {
@@ -263,7 +275,7 @@
     return () => clearInterval(interval);
   });
 
-  $: pageSize, updatePageSlice();
+  $: pageSize, now, updatePageSlice();
 </script>
 
 <svelte:head>
