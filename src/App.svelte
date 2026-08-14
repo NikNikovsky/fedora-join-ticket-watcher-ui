@@ -27,6 +27,17 @@
   let showReminders = false;
   let reminderThresholdDays = 14;
   let reminderIssues: Issue[] = [];
+  let now = Date.now();
+  let localTimeLabel = '';
+  let timeZoneLabel = '';
+  const timestampFormatter = new Intl.DateTimeFormat([], {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  });
+
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
 
   function toPositiveInt(value: unknown, fallback: number) {
     const parsed = Number.parseInt(String(value), 10);
@@ -40,6 +51,63 @@
 
   function getRecency(it: any) {
     return Date.parse(it.last_comment_at ?? it.updated_at);
+  }
+
+  function formatClock() {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+    now = Date.now();
+    localTimeLabel = timestampFormatter.format(new Date(now));
+    timeZoneLabel = timeZone;
+  }
+
+  function formatTimestamp(value?: string) {
+    if (!value) {
+      return 'unknown';
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? value : timestampFormatter.format(new Date(parsed));
+  }
+
+  function formatDuration(ms: number) {
+    const absMs = Math.max(0, Math.abs(ms));
+    const days = Math.floor(absMs / dayMs);
+    const hours = Math.floor((absMs % dayMs) / hourMs);
+    const minutes = Math.floor((absMs % hourMs) / minuteMs);
+
+    if (days > 0) {
+      return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    }
+
+    if (hours > 0) {
+      return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+    }
+
+    if (minutes > 0) {
+      return `${minutes}m`;
+    }
+
+    return 'less than 1m';
+  }
+
+  function getReminderDeadline(issue: Issue) {
+    const lastActivity = Date.parse(issue.last_comment_at ?? issue.updated_at);
+    return lastActivity + reminderThresholdDays * dayMs;
+  }
+
+  function getReminderCountdown(issue: Issue) {
+    const remaining = getReminderDeadline(issue) - now;
+    if (remaining === 0) {
+      return 'Due now';
+    }
+
+    return remaining > 0
+      ? `Due in ${formatDuration(remaining)}`
+      : `Overdue by ${formatDuration(remaining)}`;
+  }
+
+  function getReminderTone(issue: Issue) {
+    return getReminderDeadline(issue) - now <= 0 ? 'late' : 'soon';
   }
 
   function buildForgeUrl(path: string) {
@@ -188,6 +256,13 @@
     return issue.labels.map((l) => (typeof l === 'string' ? l : l.name)).filter(Boolean);
   }
 
+  onMount(() => {
+    formatClock();
+    const interval = setInterval(formatClock, minuteMs);
+
+    return () => clearInterval(interval);
+  });
+
   $: pageSize, updatePageSlice();
 </script>
 
@@ -208,6 +283,10 @@
         <div>
           <strong>{issues.length}</strong>
           <span>recent issues loaded</span>
+        </div>
+        <div>
+          <strong>{localTimeLabel || 'loading…'}</strong>
+          <span>{timeZoneLabel || 'your local timezone'}</span>
         </div>
         <div>
           <strong>{pageSize}</strong>
@@ -309,7 +388,10 @@
                 </div>
 
                 <div class="card-meta">
-                  <span><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></span>
+                  <span><strong>Last comment:</strong> <span class="mono">{formatTimestamp(issue.last_comment_at ?? issue.updated_at)}</span></span>
+                  <span class:late={getReminderTone(issue) === 'late'} class:soon={getReminderTone(issue) === 'soon'} class="countdown">
+                    <strong>Reminder:</strong> {getReminderCountdown(issue)}
+                  </span>
                   
                   {#if issue.assignees.length > 0}
                     <span><strong>Assignees:</strong> {issue.assignees.join(', ')}</span>
@@ -351,7 +433,10 @@
                   <span class="issue-title">{issue.title}</span>
                 </div>
                 <div class="card-meta">
-                  <small><strong>Last comment:</strong> <span class="mono">{issue.last_comment_at ?? issue.updated_at}</span></small>
+                  <small><strong>Last comment:</strong> <span class="mono">{formatTimestamp(issue.last_comment_at ?? issue.updated_at)}</span></small>
+                  <small class:late={getReminderTone(issue) === 'late'} class:soon={getReminderTone(issue) === 'soon'} class="countdown">
+                    <strong>Reminder:</strong> {getReminderCountdown(issue)}
+                  </small>
                 </div>
               </div>
             {/each}
@@ -453,6 +538,11 @@
   .hero-stats span {
     font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.88);
+  }
+
+  .hero-stats div:nth-child(2) strong {
+    font-size: 0.95rem;
+    line-height: 1.35;
   }
 
   .hero-art img {
@@ -626,6 +716,25 @@
     align-items: center;
     font-size: 0.82rem;
     color: #475569;
+  }
+
+  .countdown {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(29, 78, 216, 0.08);
+    border: 1px solid rgba(29, 78, 216, 0.12);
+  }
+
+  .countdown.soon {
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.18);
+    color: #9a5800;
+  }
+
+  .countdown.late {
+    background: rgba(220, 38, 38, 0.08);
+    border-color: rgba(220, 38, 38, 0.16);
+    color: #a61d1d;
   }
 
   .tag-list {
