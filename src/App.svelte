@@ -255,7 +255,7 @@
           last_comment_at: lastCommentAt,
           labels: it.labels ?? [],
           assignees: (it.assignees ?? []).map((a: any) => a?.login).filter(Boolean),
-          html_url: it.html_url ?? '#'
+          html_url: typeof it.html_url === 'string' && it.html_url.startsWith('https://') ? it.html_url : '#'
         };
       })
     );
@@ -403,7 +403,7 @@
       <div class="control-grid">
         <label>
           Forgejo token
-          <input bind:value={token} type="password" placeholder="paste token" />
+          <input bind:value={token} type="password" placeholder="paste token" autocomplete="off" />
         </label>
 
         <label>
