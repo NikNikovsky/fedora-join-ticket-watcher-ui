@@ -27,6 +27,11 @@
   let showReminders = false;
   let reminderThresholdDays = 14;
   let reminderIssues: Issue[] = [];
+  let dueReminderCount = 0;
+  let bannerDismissed = false;
+  let notificationsSupported = typeof Notification !== 'undefined';
+  let notificationsEnabled = false;
+  let notifiedDeadlines = new Set<string>();
   let now = Date.now();
   let localTimeLabel = '';
   let timeZoneLabel = '';
@@ -58,6 +63,7 @@
     now = Date.now();
     localTimeLabel = timestampFormatter.format(new Date(now));
     timeZoneLabel = timeZone;
+    pollDueReminders();
   }
 
   function formatTimestamp(value?: string) {
@@ -119,6 +125,62 @@
     }
 
     return left.index - right.index;
+  }
+
+  function pollDueReminders() {
+    if (!notificationsEnabled || !notificationsSupported) return;
+    if (Notification.permission !== 'granted') {
+      notificationsEnabled = false;
+      return;
+    }
+
+    const fresh = reminderIssues.filter((it) => {
+      if (getReminderDeadline(it) - now > 0) return false;
+      const key = `${it.index}:${getReminderDeadline(it)}`;
+      if (notifiedDeadlines.has(key)) return false;
+      notifiedDeadlines.add(key);
+      return true;
+    });
+
+    if (fresh.length === 0) return;
+
+    if (fresh.length === 1) {
+      const ticket = fresh[0];
+      new Notification(`Reminder due: #${ticket.index}`, {
+        body: `${ticket.title} — ${getReminderCountdown(ticket)}`,
+        tag: `wtw-reminder-${ticket.index}:${getReminderDeadline(ticket)}`
+      });
+    } else {
+      new Notification('Reminders due', {
+        body: `${fresh.length} ticket(s) are due for a nudge.`,
+        tag: 'wtw-reminders-summary'
+      });
+    }
+  }
+
+  async function toggleNotifications() {
+    if (!notificationsSupported) return;
+
+    if (notificationsEnabled) {
+      notificationsEnabled = false;
+      setStatus('Browser notifications are off.');
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      setStatus('Browser notifications were not allowed.', 'error');
+      return;
+    }
+
+    notificationsEnabled = true;
+    notifiedDeadlines.clear();
+    new Notification('Notifications are on', {
+      body: 'Test successful — you will be notified when a ticket reminder comes due.',
+      tag: 'wtw-notifications-test'
+    });
+    pollDueReminders();
+    setStatus('Browser notifications are on.');
   }
 
   function buildForgeUrl(path: string) {
@@ -252,6 +314,8 @@
       const reminderCutoff = Date.now() - reminderThresholdDays * 24 * 60 * 60 * 1000;
       reminderIssues = fetchedIssues.filter((it) => getRecency(it) < reminderCutoff).sort(compareByReminderCountdown);
       showReminders = reminderIssues.length > 0;
+      bannerDismissed = false;
+      pollDueReminders();
       setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).` + (showReminders ? ` ${reminderIssues.length} reminder candidate(s).` : ''));
     } catch (e: any) {
       setStatus(e?.message ?? String(e), 'error');
@@ -276,6 +340,7 @@
   });
 
   $: pageSize, now, updatePageSlice();
+  $: dueReminderCount = reminderIssues.filter((it) => getReminderDeadline(it) - now <= 0).length;
 </script>
 
 <svelte:head>
@@ -315,6 +380,16 @@
       <img src={heroImage} alt="" />
     </div>
   </section>
+
+  {#if showReminders && dueReminderCount > 0 && !bannerDismissed}
+    <section class="panel alert-banner">
+      <div class="alert-copy">
+        <strong>{dueReminderCount} reminder(s) are due now.</strong>
+        <span class="meta">Open tickets are overdue for a nudge. See the Reminder candidates panel.</span>
+      </div>
+      <button class="ghost-btn" on:click={() => (bannerDismissed = true)}>Dismiss</button>
+    </section>
+  {/if}
 
   <!-- Side-Control Workspace Layout -->
   <div class:has-reminders={showReminders} class="workspace">
@@ -364,6 +439,16 @@
       <div class="buttons">
         <button class="primary-btn" on:click={loadIssues} disabled={loading}>
           {loading ? 'Loading…' : 'Load issues'}
+        </button>
+        <button
+          class:active={notificationsEnabled}
+          class="notify-btn"
+          on:click={toggleNotifications}
+          disabled={!notificationsSupported}
+        >
+          {notificationsSupported
+            ? (notificationsEnabled ? 'Browser notifications: ON' : 'Browser notifications: OFF')
+            : 'Notifications unsupported'}
         </button>
       </div>
 
@@ -466,6 +551,7 @@
     padding: 24px 18px 44px;
     display: grid;
     gap: 20px;
+    zoom: 0.82;
   }
 
   .panel {
@@ -655,6 +741,51 @@
     width: 100%;
     background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
     padding: 12px;
+  }
+
+  .notify-btn {
+    width: 100%;
+    background: rgba(247, 250, 255, 0.96);
+    color: #1d4ed8;
+    border: 1px solid rgba(39, 89, 203, 0.18);
+  }
+
+  .notify-btn.active {
+    background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
+    color: white;
+    border: 0;
+  }
+
+  .alert-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 20px;
+    background: rgba(254, 243, 199, 0.55);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+  }
+
+  .alert-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .alert-copy strong {
+    color: #92400e;
+    font-size: 0.95rem;
+  }
+
+  .ghost-btn {
+    flex-shrink: 0;
+    background: transparent;
+    color: #92400e;
+    border: 1px solid rgba(180, 83, 9, 0.4);
+  }
+
+  .ghost-btn:hover {
+    background: rgba(180, 83, 9, 0.08);
   }
 
   button:disabled {
