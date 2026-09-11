@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import heroImage from './assets/hero.png';
   import type { Issue } from './lib/types';
 
   const OWNER = 'join';
@@ -32,17 +31,20 @@
   let notificationsSupported = typeof Notification !== 'undefined';
   let notificationsEnabled = false;
   let notifiedDeadlines = new Set<string>();
-  let now = Date.now();
-  let localTimeLabel = '';
-  let timeZoneLabel = '';
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+  const refreshIntervalMs = 5 * minuteMs;
   const timestampFormatter = new Intl.DateTimeFormat([], {
     dateStyle: 'medium',
     timeStyle: 'short'
   });
 
-  const minuteMs = 60 * 1000;
-  const hourMs = 60 * minuteMs;
-  const dayMs = 24 * hourMs;
+  let now = Date.now();
+  let localTimeLabel = '';
+  let timeZoneLabel = '';
+  let nextRefreshAt = Date.now() + refreshIntervalMs;
+  let refreshCountdownLabel = '';
 
   function toPositiveInt(value: unknown, fallback: number) {
     const parsed = Number.parseInt(String(value), 10);
@@ -63,6 +65,10 @@
     now = Date.now();
     localTimeLabel = timestampFormatter.format(new Date(now));
     timeZoneLabel = timeZone;
+    const remaining = nextRefreshAt - now;
+    refreshCountdownLabel = token.trim()
+      ? (remaining <= 0 ? 'any moment' : formatDuration(remaining))
+      : '— awaiting token';
     pollDueReminders();
   }
 
@@ -276,12 +282,15 @@
     updatePageSlice();
   }
 
-  async function loadIssues() {
+  async function loadIssues(opts: { silent?: boolean } = {}) {
     if (!token.trim()) return setStatus('Token is required.', 'error');
-    loading = true;
-    setStatus('Loading issues and comment timelines...');
-    reminderIssues = [];
-    showReminders = false;
+    const silent = opts.silent === true;
+    if (!silent) {
+      loading = true;
+      setStatus('Loading issues and comment timelines...');
+      reminderIssues = [];
+      showReminders = false;
+    }
     try {
       const apiPageSize = 50;
       const fetchedIssues: Issue[] = [];
@@ -308,23 +317,33 @@
       debug = `rows=${fetchedIssues.length} recent=${recentCount}`;
       issues = fetchedIssues;
       
-      currentPage = 1;
+      if (!silent) {
+        currentPage = 1;
+      }
       updatePageSlice();
 
       const reminderCutoff = Date.now() - reminderThresholdDays * 24 * 60 * 60 * 1000;
       reminderIssues = fetchedIssues.filter((it) => getRecency(it) < reminderCutoff).sort(compareByReminderCountdown);
       showReminders = reminderIssues.length > 0;
-      bannerDismissed = false;
+      if (!silent) bannerDismissed = false;
       pollDueReminders();
-      setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).` + (showReminders ? ` ${reminderIssues.length} reminder candidate(s).` : ''));
+      if (silent) {
+        setStatus(`Auto-refreshed ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).`);
+      } else {
+        setStatus(`Loaded ${issues.length} issue(s); ${recentCount} updated in the last ${sinceDays} day(s).` + (showReminders ? ` ${reminderIssues.length} reminder candidate(s).` : ''));
+      }
     } catch (e: any) {
-      setStatus(e?.message ?? String(e), 'error');
-      issues = [];
-      pageIssues = [];
-      totalIssues = 0;
-      totalPages = 1;
+      if (silent) {
+        setStatus(`Auto-refresh failed: ${e?.message ?? String(e)}`, 'error');
+      } else {
+        setStatus(e?.message ?? String(e), 'error');
+        issues = [];
+        pageIssues = [];
+        totalIssues = 0;
+        totalPages = 1;
+      }
     } finally {
-      loading = false;
+      if (!silent) loading = false;
     }
   }
 
@@ -335,8 +354,17 @@
   onMount(() => {
     formatClock();
     const interval = setInterval(formatClock, minuteMs);
+    const refreshInterval = setInterval(() => {
+      if (token.trim() && !loading) {
+        nextRefreshAt = Date.now() + refreshIntervalMs;
+        loadIssues({ silent: true });
+      }
+    }, refreshIntervalMs);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      clearInterval(refreshInterval);
+    };
   });
 
   $: pageSize, now, updatePageSlice();
@@ -366,18 +394,10 @@
           <span>{timeZoneLabel || 'your local timezone'}</span>
         </div>
         <div>
-          <strong>{pageSize}</strong>
-          <span>tickets per page</span>
-        </div>
-        <div>
-          <strong>{reminderIssues.length}</strong>
-          <span>reminders queued</span>
+          <strong>{refreshCountdownLabel || '…'}</strong>
+          <span>until auto refresh</span>
         </div>
       </div>
-    </div>
-
-    <div class="hero-art" aria-hidden="true">
-      <img src={heroImage} alt="" />
     </div>
   </section>
 
@@ -455,6 +475,8 @@
       {#if debug}
         <div class="meta code-line">{debug}</div>
       {/if}
+
+      <div class="meta">Auto-refreshes every 5 minutes while a token is set.</div>
     </aside>
 
     <!-- Main Content Area (Compact Issue Feed) -->
@@ -565,10 +587,6 @@
 
   /* Hero Section */
   .hero {
-    display: grid;
-    grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.85fr);
-    gap: 18px;
-    align-items: center;
     padding: 28px;
     position: relative;
     overflow: hidden;
@@ -636,19 +654,6 @@
   .hero-stats span {
     font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.88);
-  }
-
-  .hero-stats div:nth-child(2) strong {
-    font-size: 0.95rem;
-    line-height: 1.35;
-  }
-
-  .hero-art img {
-    width: min(100%, 260px);
-    height: auto;
-    background: rgba(255, 255, 255, 0.82);
-    border-radius: 20px;
-    padding: 10px;
   }
 
   /* Workspace Layout */
@@ -905,10 +910,6 @@
 
   @media (max-width: 1080px) {
     .workspace {
-      grid-template-columns: 1fr;
-    }
-
-    .hero {
       grid-template-columns: 1fr;
     }
 
