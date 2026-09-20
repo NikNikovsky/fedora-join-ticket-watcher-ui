@@ -7,6 +7,34 @@
   const PRODUCTION_FORGE_BASE_URL = 'https://forge.fedoraproject.org';
   const FORGE_BASE_URL = import.meta.env.PROD ? PRODUCTION_FORGE_BASE_URL : '/forge';
 
+  const templates = [
+    {
+      id: 'progress-1-2',
+      title: 'Progress check 1 & 2',
+      text: `Hello!
+Just doing a quick check-in to see how you're settling in.
+Are you stuck anywhere, or would you like some guidance on finding a team to join? Feel free to ask any questions!`
+    },
+    {
+      id: 'progress-3',
+      title: 'Progress check 3',
+      text: `Hello!
+Just doing a quick check-in to see how you're settling in.
+Are you stuck anywhere, or would you like some guidance on finding a team to join? Feel free to ask any questions!
+If you do not respond within 2 weeks, we will close this ticket for housekeeping purposes`
+    },
+    {
+      id: 'progress-4',
+      title: 'Progress check 4',
+      text: `Hello,
+Due to a lack of activity, we are closing this ticket for housekeeping purposes.
+Whenever you are ready to contribute again, just re open this ticket and let us know.`
+    }
+  ];
+
+  let copiedTemplateId = '';
+  let templatesOpen = false;
+
   let token = '';
   let state: 'open' | 'all' | 'closed' = 'open';
   let labels = '';
@@ -56,6 +84,25 @@
     statusKind = kind;
   }
 
+  async function copyTemplate(tplId: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    copiedTemplateId = tplId;
+    setTimeout(() => {
+      if (copiedTemplateId === tplId) copiedTemplateId = '';
+    }, 2000);
+  }
+
   function getRecency(it: any) {
     return Date.parse(it.last_comment_at ?? it.updated_at);
   }
@@ -65,10 +112,6 @@
     now = Date.now();
     localTimeLabel = timestampFormatter.format(new Date(now));
     timeZoneLabel = timeZone;
-    const remaining = nextRefreshAt - now;
-    refreshCountdownLabel = token.trim()
-      ? (remaining <= 0 ? 'any moment' : formatDuration(remaining))
-      : '— awaiting token';
     pollDueReminders();
   }
 
@@ -240,7 +283,9 @@
           : Object.values(data ?? {}).filter((v) => v && typeof v === 'object');
 
     return Promise.all(
-      rows.map(async (it: any) => {
+      rows
+        .filter((it: any) => !it.pull_request && !it.is_pull_request)
+        .map(async (it: any) => {
         // Base the default time on the issue's original creation, not its last update
         let lastCommentAt = it.created_at;
         
@@ -319,6 +364,7 @@
       
       if (!silent) {
         currentPage = 1;
+        nextRefreshAt = Date.now() + refreshIntervalMs;
       }
       updatePageSlice();
 
@@ -369,6 +415,9 @@
 
   $: pageSize, now, updatePageSlice();
   $: dueReminderCount = reminderIssues.filter((it) => getReminderDeadline(it) - now <= 0).length;
+  $: refreshCountdownLabel = token.trim()
+    ? (nextRefreshAt - now <= 0 ? 'any moment' : formatDuration(Math.max(0, nextRefreshAt - now)))
+    : '— awaiting token';
 </script>
 
 <svelte:head>
@@ -564,6 +613,36 @@
       </section>
     {/if}
   </div>
+
+  <!-- Templates corner menu -->
+  <button class="fab" on:click={() => (templatesOpen = !templatesOpen)} aria-expanded={templatesOpen}>
+    Templates
+  </button>
+
+  {#if templatesOpen}
+    <div class="fab-menu">
+      <div class="section-title compact">
+        <h2>Templates</h2>
+        <button class="ghost-btn" on:click={() => (templatesOpen = false)}>Close</button>
+      </div>
+
+      {#each templates as tpl}
+        <div class="template-card">
+          <div class="template-head">
+            <strong>{tpl.title}</strong>
+            <button
+              class:copied={copiedTemplateId === tpl.id}
+              class="copy-btn"
+              on:click={() => copyTemplate(tpl.id, tpl.text)}
+            >
+              {copiedTemplateId === tpl.id ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <p class="template-preview">{tpl.text}</p>
+        </div>
+      {/each}
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -729,6 +808,80 @@
   .buttons {
     display: flex;
     gap: 10px;
+  }
+
+  .fab {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 50;
+    padding: 12px 18px;
+    background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
+    box-shadow: 0 14px 30px rgba(29, 78, 216, 0.32);
+  }
+
+  .fab-menu {
+    position: fixed;
+    right: 24px;
+    bottom: 84px;
+    z-index: 51;
+    width: min(380px, calc(100vw - 48px));
+    max-height: 70vh;
+    overflow-y: auto;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(36, 74, 180, 0.12);
+    border-radius: 18px;
+    box-shadow: 0 22px 54px rgba(25, 47, 104, 0.2);
+    backdrop-filter: blur(12px);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .template-card {
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: rgba(243, 247, 255, 0.7);
+    border: 1px solid rgba(32, 72, 174, 0.1);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .template-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .template-head strong {
+    font-size: 0.88rem;
+    color: #13213c;
+  }
+
+  .copy-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    background: rgba(247, 250, 255, 0.96);
+    color: #1d4ed8;
+    border: 1px solid rgba(39, 89, 203, 0.18);
+  }
+
+  .copy-btn.copied {
+    background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #4f86ff);
+    color: white;
+    border: 0;
+  }
+
+  .template-preview {
+    margin: 0;
+    color: #475569;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
   }
 
   button {
