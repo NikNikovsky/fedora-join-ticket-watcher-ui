@@ -8,3 +8,10 @@ This is made specifically for the [Fedora Join SIG](https://forge.fedoraproject.
 npm install
 npm run dev
 ```
+
+## Running in environments that expect `npm start`
+
+```bash
+npm install
+npm start
+```
